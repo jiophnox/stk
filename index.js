@@ -90,6 +90,10 @@ function getYtDlpOptions() {
   const options = {
     noCheckCertificate: true,
     preferFreeFormats: true,
+    
+    // ✅ ADD THESE TO BYPASS BOT DETECTION
+    extractor_args: "youtube:player_client=ios,web",
+    
     addHeader: [
       "User-Agent:Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
       "Accept:text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
@@ -98,6 +102,7 @@ function getYtDlpOptions() {
     ],
   };
 
+  // ✅ IMPROVED COOKIE HANDLING
   if (hasCookies) {
     const absoluteCookiePath = path.resolve(cookiesPath);
     console.log("🍪 Using cookies from:", absoluteCookiePath);
@@ -259,53 +264,84 @@ async function getVideoInfo(url) {
   try {
     console.log("🔍 Fetching video info for:", url);
 
-    const info = await retryOperation(
-      async () => {
-        return await youtubedl(url, {
-          dumpSingleJson: true,
-          skipDownload: true,
-          noPlaylist: true,
-          ...getYtDlpOptions(),
-        });
-      },
-      3,
-      3000
-    );
-
-    let thumbnailUrl = info.thumbnail;
-    if (info.thumbnails && info.thumbnails.length > 0) {
-      thumbnailUrl = getBestThumbnail(info.thumbnails) || thumbnailUrl;
+    // ✅ EXTRACT VIDEO ID
+    const videoIdMatch = url.match(/(?:v=|\/)([a-zA-Z0-9_-]{11})/);
+    if (!videoIdMatch) {
+      throw new Error("Invalid YouTube URL");
     }
+    const videoId = videoIdMatch[1];
+    console.log("📹 Video ID:", videoId);
+
+    // ✅ USE YOUTUBEI.JS (More reliable than yt-dlp for info)
+    const yt = await Innertube.create();
+    const videoDetails = await yt.getInfo(videoId);
+
+    const info = videoDetails.basic_info;
 
     console.log("✅ Video info fetched:", info.title);
 
     return {
       title: info.title || "Unknown",
       duration: info.duration || 0,
-      uploader: info.uploader || info.channel || "Unknown",
-      thumbnail: thumbnailUrl,
+      uploader: info.author || info.channel?.name || "Unknown",
+      thumbnail: info.thumbnail?.[0]?.url || null,
       url: url,
     };
   } catch (error) {
     console.error("❌ getVideoInfo error:", error.message);
 
-    if (error.message.includes("bot") || error.message.includes("Sign in")) {
-      throw new Error(
-        "⚠️ YouTube bot detection! Cookies may be expired or invalid.\n\n" +
-        "Try:\n" +
-        "1. Export fresh cookies from youtube.com\n" +
-        "2. Make sure you're logged in to YouTube\n" +
-        "3. Use Chrome extension: 'Get cookies.txt LOCALLY'"
-      );
-    } else if (error.message.includes("Private video")) {
-      throw new Error("This is a private video.");
-    } else if (error.message.includes("available")) {
-      throw new Error("Video not available.");
-    } else if (error.message.includes("copyright")) {
-      throw new Error("Video blocked due to copyright.");
-    }
+    // ✅ FALLBACK TO YT-DLP (with improved settings)
+    console.log("🔄 Trying fallback method with yt-dlp...");
+    
+    try {
+      const info = await youtubedl(url, {
+        dumpSingleJson: true,
+        skipDownload: true,
+        noPlaylist: true,
+        extractorArgs: "youtube:player_client=ios,web", // ✅ iOS client bypass
+        ...getYtDlpOptions(),
+      });
 
-    throw new Error(`Failed to get video info: ${error.message}`);
+      let thumbnailUrl = info.thumbnail;
+      if (info.thumbnails && info.thumbnails.length > 0) {
+        thumbnailUrl = getBestThumbnail(info.thumbnails) || thumbnailUrl;
+      }
+
+      console.log("✅ Video info fetched (fallback):", info.title);
+
+      return {
+        title: info.title || "Unknown",
+        duration: info.duration || 0,
+        uploader: info.uploader || info.channel || "Unknown",
+        thumbnail: thumbnailUrl,
+        url: url,
+      };
+    } catch (fallbackError) {
+      console.error("❌ Fallback also failed:", fallbackError.message);
+
+      if (
+        fallbackError.message.includes("bot") ||
+        fallbackError.message.includes("Sign in") ||
+        fallbackError.message.includes("429")
+      ) {
+        throw new Error(
+          "⚠️ YouTube rate limit or bot detection!\n\n" +
+          "Possible solutions:\n" +
+          "1. Wait 5-10 minutes before trying again\n" +
+          "2. Export fresh cookies from youtube.com\n" +
+          "3. Use a VPN or different IP address\n" +
+          "4. Try again later when traffic is lower"
+        );
+      } else if (fallbackError.message.includes("Private video")) {
+        throw new Error("This is a private video.");
+      } else if (fallbackError.message.includes("available")) {
+        throw new Error("Video not available.");
+      } else if (fallbackError.message.includes("copyright")) {
+        throw new Error("Video blocked due to copyright.");
+      }
+
+      throw new Error(`Failed to get video info: ${fallbackError.message}`);
+    }
   }
 }
 
@@ -412,15 +448,16 @@ async function downloadMP3(url, chatId, messageId, statusMessage) {
     console.log("⬇️ Starting MP3 download...");
     console.log(`📁 Filename: ${sanitizedTitle}.mp3`);
 
-    const downloadPromise = youtubedl(url, {
-      extractAudio: true,
-      audioFormat: "mp3",
-      audioQuality: 0,
-      output: audioPath,
-      noPlaylist: true,
-      ffmpegLocation: ffmpegPath.path, // ✅ ADD THIS LINE
-      ...getYtDlpOptions(),
-    });
+const downloadPromise = youtubedl(url, {
+  extractAudio: true,
+  audioFormat: "mp3",
+  audioQuality: 0,
+  output: audioPath,
+  noPlaylist: true,
+  extractorArgs: "youtube:player_client=ios,web", // ✅ ADD THIS
+  ffmpegLocation: ffmpegPath.path,
+  ...getYtDlpOptions(),
+});
 
     const progressInterval = setInterval(async () => {
       const now = Date.now();
@@ -683,13 +720,14 @@ async function downloadVideo(url, chatId, messageId, quality, statusMessage) {
     console.log(`⬇️ Starting ${qualityLabel} video download...`);
     console.log(`📁 Filename: ${sanitizedTitle}.mp4`);
 
-    const downloadPromise = youtubedl(url, {
-      format: formatString,
-      output: videoPath,
-      noPlaylist: true,
-      mergeOutputFormat: "mp4",
-      ...getYtDlpOptions(),
-    });
+const downloadPromise = youtubedl(url, {
+  format: formatString,
+  output: videoPath,
+  noPlaylist: true,
+  mergeOutputFormat: "mp4",
+  extractorArgs: "youtube:player_client=ios,web", // ✅ ADD THIS
+  ...getYtDlpOptions(),
+});
 
     const progressInterval = setInterval(async () => {
       const now = Date.now();
