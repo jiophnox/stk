@@ -91,8 +91,8 @@ function getYtDlpOptions() {
     noCheckCertificate: true,
     preferFreeFormats: true,
     
-    // ✅ ADD THESE TO BYPASS BOT DETECTION
-    extractor_args: "youtube:player_client=ios,web",
+    // ✅ CORRECT: Use hyphen, not underscore
+    extractorArgs: "youtube:player_client=ios,web",
     
     addHeader: [
       "User-Agent:Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -102,7 +102,6 @@ function getYtDlpOptions() {
     ],
   };
 
-  // ✅ IMPROVED COOKIE HANDLING
   if (hasCookies) {
     const absoluteCookiePath = path.resolve(cookiesPath);
     console.log("🍪 Using cookies from:", absoluteCookiePath);
@@ -114,8 +113,6 @@ function getYtDlpOptions() {
     } catch (error) {
       console.log("❌ Cannot read cookies file:", error.message);
     }
-  } else {
-    console.log("⚠️  No cookies provided to yt-dlp");
   }
 
   return options;
@@ -264,84 +261,60 @@ async function getVideoInfo(url) {
   try {
     console.log("🔍 Fetching video info for:", url);
 
-    // ✅ EXTRACT VIDEO ID
-    const videoIdMatch = url.match(/(?:v=|\/)([a-zA-Z0-9_-]{11})/);
-    if (!videoIdMatch) {
-      throw new Error("Invalid YouTube URL");
+    // ✅ DIRECT YT-DLP APPROACH (Most reliable)
+    const info = await retryOperation(
+      async () => {
+        return await youtubedl(url, {
+          dumpSingleJson: true,
+          skipDownload: true,
+          noPlaylist: true,
+          extractorArgs: "youtube:player_client=ios,web",
+          ...getYtDlpOptions(),
+        });
+      },
+      3,
+      5000 // Increased delay between retries
+    );
+
+    let thumbnailUrl = info.thumbnail;
+    if (info.thumbnails && info.thumbnails.length > 0) {
+      thumbnailUrl = getBestThumbnail(info.thumbnails) || thumbnailUrl;
     }
-    const videoId = videoIdMatch[1];
-    console.log("📹 Video ID:", videoId);
-
-    // ✅ USE YOUTUBEI.JS (More reliable than yt-dlp for info)
-    const yt = await Innertube.create();
-    const videoDetails = await yt.getInfo(videoId);
-
-    const info = videoDetails.basic_info;
 
     console.log("✅ Video info fetched:", info.title);
 
     return {
       title: info.title || "Unknown",
       duration: info.duration || 0,
-      uploader: info.author || info.channel?.name || "Unknown",
-      thumbnail: info.thumbnail?.[0]?.url || null,
+      uploader: info.uploader || info.channel || "Unknown",
+      thumbnail: thumbnailUrl,
       url: url,
     };
   } catch (error) {
     console.error("❌ getVideoInfo error:", error.message);
 
-    // ✅ FALLBACK TO YT-DLP (with improved settings)
-    console.log("🔄 Trying fallback method with yt-dlp...");
-    
-    try {
-      const info = await youtubedl(url, {
-        dumpSingleJson: true,
-        skipDownload: true,
-        noPlaylist: true,
-        extractorArgs: "youtube:player_client=ios,web", // ✅ iOS client bypass
-        ...getYtDlpOptions(),
-      });
-
-      let thumbnailUrl = info.thumbnail;
-      if (info.thumbnails && info.thumbnails.length > 0) {
-        thumbnailUrl = getBestThumbnail(info.thumbnails) || thumbnailUrl;
-      }
-
-      console.log("✅ Video info fetched (fallback):", info.title);
-
-      return {
-        title: info.title || "Unknown",
-        duration: info.duration || 0,
-        uploader: info.uploader || info.channel || "Unknown",
-        thumbnail: thumbnailUrl,
-        url: url,
-      };
-    } catch (fallbackError) {
-      console.error("❌ Fallback also failed:", fallbackError.message);
-
-      if (
-        fallbackError.message.includes("bot") ||
-        fallbackError.message.includes("Sign in") ||
-        fallbackError.message.includes("429")
-      ) {
-        throw new Error(
-          "⚠️ YouTube rate limit or bot detection!\n\n" +
-          "Possible solutions:\n" +
-          "1. Wait 5-10 minutes before trying again\n" +
-          "2. Export fresh cookies from youtube.com\n" +
-          "3. Use a VPN or different IP address\n" +
-          "4. Try again later when traffic is lower"
-        );
-      } else if (fallbackError.message.includes("Private video")) {
-        throw new Error("This is a private video.");
-      } else if (fallbackError.message.includes("available")) {
-        throw new Error("Video not available.");
-      } else if (fallbackError.message.includes("copyright")) {
-        throw new Error("Video blocked due to copyright.");
-      }
-
-      throw new Error(`Failed to get video info: ${fallbackError.message}`);
+    if (
+      error.message.includes("bot") ||
+      error.message.includes("Sign in") ||
+      error.message.includes("429")
+    ) {
+      throw new Error(
+        "⚠️ YouTube rate limit or bot detection!\n\n" +
+        "Solutions:\n" +
+        "1. Wait 10-15 minutes\n" +
+        "2. Export fresh cookies\n" +
+        "3. Try a different video\n" +
+        "4. Use VPN if available"
+      );
+    } else if (error.message.includes("Private video")) {
+      throw new Error("This is a private video.");
+    } else if (error.message.includes("available")) {
+      throw new Error("Video not available.");
+    } else if (error.message.includes("copyright")) {
+      throw new Error("Video blocked due to copyright.");
     }
+
+    throw new Error(`Failed to get video info: ${error.message}`);
   }
 }
 
@@ -352,30 +325,26 @@ async function getPlaylistVideos(playlistId, chatId, messageId) {
       replyTo: messageId,
     });
 
-    const yt = await Innertube.create();
-    let playlist = await yt.getPlaylist(playlistId);
+    const playlistUrl = `https://www.youtube.com/playlist?list=${playlistId}`;
 
-    const allVideos = [];
-    allVideos.push(...playlist.videos);
+    console.log("📝 Fetching playlist with yt-dlp...");
 
-    let lastUpdate = Date.now();
-    while (playlist.has_continuation) {
-      playlist = await playlist.getContinuation();
-      allVideos.push(...playlist.videos);
+    // ✅ USE YT-DLP INSTEAD OF YOUTUBEI.JS
+    const playlistInfo = await youtubedl(playlistUrl, {
+      dumpSingleJson: true,
+      flatPlaylist: true,
+      extractorArgs: "youtube:player_client=ios,web",
+      ...getYtDlpOptions(),
+    });
 
-      const now = Date.now();
-      if (now - lastUpdate >= 3000) {
-        lastUpdate = now;
-        await loadingMsg.edit({
-          text: `🔍 Fetching playlist videos...\n📊 Loaded: ${allVideos.length} videos`,
-        });
-      }
-    }
+    await loadingMsg.edit({
+      text: `🔍 Processing playlist...\n📊 Found: ${playlistInfo.entries.length} videos`,
+    });
 
-    const videos = allVideos.map((v) => ({
-      title: v.title.text,
-      thumbnail: v.thumbnails[0]?.url,
-      url: `https://www.youtube.com/watch?v=${v.id}`,
+    const videos = playlistInfo.entries.map((v) => ({
+      title: v.title || "Unknown",
+      thumbnail: v.thumbnail || null,
+      url: v.url || `https://www.youtube.com/watch?v=${v.id}`,
     }));
 
     await loadingMsg.delete({ revoke: true });
@@ -384,7 +353,7 @@ async function getPlaylistVideos(playlistId, chatId, messageId) {
     return videos;
   } catch (error) {
     console.error("Playlist fetch error:", error);
-    throw new Error("Failed to fetch playlist");
+    throw new Error("Failed to fetch playlist: " + error.message);
   }
 }
 
@@ -454,7 +423,7 @@ const downloadPromise = youtubedl(url, {
   audioQuality: 0,
   output: audioPath,
   noPlaylist: true,
-  extractorArgs: "youtube:player_client=ios,web", // ✅ ADD THIS
+  extractorArgs: "youtube:player_client=ios,web", // ✅ Correct option
   ffmpegLocation: ffmpegPath.path,
   ...getYtDlpOptions(),
 });
@@ -725,7 +694,7 @@ const downloadPromise = youtubedl(url, {
   output: videoPath,
   noPlaylist: true,
   mergeOutputFormat: "mp4",
-  extractorArgs: "youtube:player_client=ios,web", // ✅ ADD THIS
+  extractorArgs: "youtube:player_client=ios,web", // ✅ Correct option
   ...getYtDlpOptions(),
 });
 
