@@ -14,11 +14,9 @@
     "cors": "^2.8.5",
     "dotenv": "^16.4.5",
     "express": "^4.21.1",
-    "playwright": "^1.56.1",
     "telegram": "^2.26.6",
     "youtube-dl-exec": "^3.0.26",
-    "youtubei.js": "^16.0.1",
-    "yt-dlp-exec": "^1.0.2"
+    "youtubei.js": "^16.0.1"
   },
   "engines": {
     "node": ">=18.0.0"
