@@ -86,10 +86,8 @@ if (hasCookies) {
   console.log("⚠️  No cookies.txt file found. Some videos may not work.");
 }
 
-// Common youtube-dl options
 function getYtDlpOptions() {
   const options = {
-    noWarnings: false, // ✅ Enable warnings to see what's happening
     noCheckCertificate: true,
     preferFreeFormats: true,
     addHeader: [
@@ -100,12 +98,10 @@ function getYtDlpOptions() {
     ],
   };
 
-  // ✅ ADD COOKIES WITH PROPER VALIDATION
   if (hasCookies) {
     const absoluteCookiePath = path.resolve(cookiesPath);
     console.log("🍪 Using cookies from:", absoluteCookiePath);
     
-    // ✅ ENSURE FILE IS READABLE
     try {
       fs.accessSync(absoluteCookiePath, fs.constants.R_OK);
       options.cookies = absoluteCookiePath;
@@ -262,14 +258,6 @@ async function retryOperation(operation, maxRetries = 3, initialDelay = 3000) {
 async function getVideoInfo(url) {
   try {
     console.log("🔍 Fetching video info for:", url);
-    
-    // ✅ LOG YT-DLP OPTIONS
-    const ytdlOptions = getYtDlpOptions();
-    console.log("🔧 yt-dlp options:", JSON.stringify({
-      hasCookies: !!ytdlOptions.cookies,
-      cookiesPath: ytdlOptions.cookies,
-      headers: ytdlOptions.addHeader?.length || 0
-    }));
 
     const info = await retryOperation(
       async () => {
@@ -277,8 +265,7 @@ async function getVideoInfo(url) {
           dumpSingleJson: true,
           skipDownload: true,
           noPlaylist: true,
-          verbose: true, // ✅ ENABLE VERBOSE LOGGING
-          ...ytdlOptions,
+          ...getYtDlpOptions(),
         });
       },
       3,
@@ -301,7 +288,6 @@ async function getVideoInfo(url) {
     };
   } catch (error) {
     console.error("❌ getVideoInfo error:", error.message);
-    console.error("❌ Full error:", error); // ✅ LOG FULL ERROR
 
     if (error.message.includes("bot") || error.message.includes("Sign in")) {
       throw new Error(
