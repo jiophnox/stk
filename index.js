@@ -52,21 +52,44 @@ const activeDownloads = new Map();
 const urlCache = new Map();
 const playlistCache = new Map();
 
-// Check for cookies file
+// ✅ BETTER COOKIE FILE HANDLING
 const cookiesPath = path.join(__dirname, "cookies.txt");
 const hasCookies = fs.existsSync(cookiesPath);
 
 if (hasCookies) {
-  console.log("✅ Cookies file found!");
+  console.log("✅ Cookies file found at:", cookiesPath);
+  
+  // ✅ CHECK FILE PERMISSIONS & CONTENT
+  try {
+    const stats = fs.statSync(cookiesPath);
+    const content = fs.readFileSync(cookiesPath, 'utf8');
+    
+    console.log("📊 Cookie file size:", stats.size, "bytes");
+    console.log("📊 Cookie lines:", content.split('\n').length);
+    console.log("📊 File permissions:", stats.mode.toString(8));
+    
+    // Verify it's actually YouTube cookies
+    if (content.includes('youtube.com')) {
+      console.log("✅ YouTube cookies detected!");
+    } else {
+      console.log("⚠️  Warning: No YouTube cookies found in file");
+    }
+    
+    // Check for expired cookies
+    const lines = content.split('\n').filter(l => !l.startsWith('#') && l.trim());
+    console.log("📊 Valid cookie lines:", lines.length);
+    
+  } catch (error) {
+    console.log("❌ Cookie file read error:", error.message);
+  }
 } else {
   console.log("⚠️  No cookies.txt file found. Some videos may not work.");
-  console.log("   Export cookies from youtube.com to avoid bot detection.");
 }
 
 // Common youtube-dl options
 function getYtDlpOptions() {
   const options = {
-    noWarnings: true,
+    noWarnings: false, // ✅ Enable warnings to see what's happening
     noCheckCertificate: true,
     preferFreeFormats: true,
     addHeader: [
@@ -77,9 +100,21 @@ function getYtDlpOptions() {
     ],
   };
 
-  // Add cookies if file exists
+  // ✅ ADD COOKIES WITH PROPER VALIDATION
   if (hasCookies) {
-    options.cookies = cookiesPath;
+    const absoluteCookiePath = path.resolve(cookiesPath);
+    console.log("🍪 Using cookies from:", absoluteCookiePath);
+    
+    // ✅ ENSURE FILE IS READABLE
+    try {
+      fs.accessSync(absoluteCookiePath, fs.constants.R_OK);
+      options.cookies = absoluteCookiePath;
+      console.log("✅ Cookies file is readable and added to options");
+    } catch (error) {
+      console.log("❌ Cannot read cookies file:", error.message);
+    }
+  } else {
+    console.log("⚠️  No cookies provided to yt-dlp");
   }
 
   return options;
@@ -227,6 +262,14 @@ async function retryOperation(operation, maxRetries = 3, initialDelay = 3000) {
 async function getVideoInfo(url) {
   try {
     console.log("🔍 Fetching video info for:", url);
+    
+    // ✅ LOG YT-DLP OPTIONS
+    const ytdlOptions = getYtDlpOptions();
+    console.log("🔧 yt-dlp options:", JSON.stringify({
+      hasCookies: !!ytdlOptions.cookies,
+      cookiesPath: ytdlOptions.cookies,
+      headers: ytdlOptions.addHeader?.length || 0
+    }));
 
     const info = await retryOperation(
       async () => {
@@ -234,7 +277,8 @@ async function getVideoInfo(url) {
           dumpSingleJson: true,
           skipDownload: true,
           noPlaylist: true,
-          ...getYtDlpOptions(),
+          verbose: true, // ✅ ENABLE VERBOSE LOGGING
+          ...ytdlOptions,
         });
       },
       3,
@@ -257,11 +301,15 @@ async function getVideoInfo(url) {
     };
   } catch (error) {
     console.error("❌ getVideoInfo error:", error.message);
+    console.error("❌ Full error:", error); // ✅ LOG FULL ERROR
 
-    // Better error messages
     if (error.message.includes("bot") || error.message.includes("Sign in")) {
       throw new Error(
-        "⚠️ YouTube bot detection! Please add cookies.txt file.\n\nSee /help for instructions."
+        "⚠️ YouTube bot detection! Cookies may be expired or invalid.\n\n" +
+        "Try:\n" +
+        "1. Export fresh cookies from youtube.com\n" +
+        "2. Make sure you're logged in to YouTube\n" +
+        "3. Use Chrome extension: 'Get cookies.txt LOCALLY'"
       );
     } else if (error.message.includes("Private video")) {
       throw new Error("This is a private video.");
