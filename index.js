@@ -11,12 +11,11 @@ import { dirname } from "path";
 import { Api } from "telegram";
 import express from "express";
 import { Innertube } from "youtubei.js";
+
+// ✅ ADD FFMPEG SUPPORT
+// install by # Terminal में run करो: npm install @ffmpeg-installer/ffmpeg @ffprobe-installer/ffprobe
 import ffmpegPath from "@ffmpeg-installer/ffmpeg";
 import ffprobePath from "@ffprobe-installer/ffprobe";
-import { promisify } from "util";
-import { exec } from "child_process";
-
-const execPromise = promisify(exec);
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -26,6 +25,7 @@ const __dirname = dirname(__filename);
 
 dotenv.config();
 
+// ✅ SET FFMPEG PATHS
 process.env.FFMPEG_PATH = ffmpegPath.path;
 process.env.FFPROBE_PATH = ffprobePath.path;
 
@@ -36,10 +36,6 @@ const API_ID = parseInt(process.env.API_ID);
 const API_HASH = process.env.API_HASH;
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const MAX_FILE_SIZE = parseInt(process.env.MAX_FILE_SIZE) || 2000;
-
-// ✅ DISABLE PROXY BY DEFAULT (can enable via env)
-const USE_PROXY = process.env.USE_PROXY === "true" && false; // Force disable
-const PROXY_URL = process.env.PROXY_URL || null;
 
 const stringSession = new StringSession("");
 
@@ -56,24 +52,19 @@ const activeDownloads = new Map();
 const urlCache = new Map();
 const playlistCache = new Map();
 
+// Check for cookies file
 const cookiesPath = path.join(__dirname, "cookies.txt");
 const hasCookies = fs.existsSync(cookiesPath);
 
 if (hasCookies) {
   console.log("✅ Cookies file found!");
 } else {
-  console.log("⚠️  No cookies.txt file found.");
+  console.log("⚠️  No cookies.txt file found. Some videos may not work.");
+  console.log("   Export cookies from youtube.com to avoid bot detection.");
 }
 
-// ✅ GENERATE RANDOM IP (for headers only, not actual proxy)
-function getRandomIP() {
-  return `${Math.floor(Math.random() * 223) + 1}.${Math.floor(Math.random() * 255)}.${Math.floor(Math.random() * 255)}.${Math.floor(Math.random() * 255)}`;
-}
-
-// ✅ IMPROVED OPTIONS - NO PROXY
+// Common youtube-dl options
 function getYtDlpOptions() {
-  const randomIP = getRandomIP();
-  
   const options = {
     noWarnings: true,
     noCheckCertificate: true,
@@ -83,17 +74,10 @@ function getYtDlpOptions() {
       "Accept:text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
       "Accept-Language:en-us,en;q=0.5",
       "Sec-Fetch-Mode:navigate",
-      `X-Forwarded-For:${randomIP}`,
-      `X-Real-IP:${randomIP}`,
     ],
   };
 
-  // ✅ ONLY USE PROXY IF EXPLICITLY ENABLED AND PROVIDED
-  if (USE_PROXY && PROXY_URL) {
-    options.proxy = PROXY_URL;
-    console.log("🔐 Using custom proxy:", PROXY_URL);
-  }
-
+  // Add cookies if file exists
   if (hasCookies) {
     options.cookies = cookiesPath;
   }
@@ -116,24 +100,50 @@ function extractPlaylistId(url) {
 }
 
 function sanitizeFilename(filename, maxBytes = 240) {
+  // Remove invalid filesystem characters
   let cleaned = filename.replace(/[/\\?%*:|"<>]/g, "-");
+
+  // Check byte length (important for UTF-8/Hindi)
   const byteLength = Buffer.byteLength(cleaned, "utf8");
 
+  // If within safe limit, return full title
   if (byteLength <= maxBytes) {
+    console.log(`✅ Full filename: ${cleaned} (${byteLength} bytes)`);
     return cleaned;
   }
+
+  // Truncate safely at byte boundary
+  console.log(
+    `⚠️ Truncating: ${cleaned.substring(0, 50)}... (${byteLength} bytes)`
+  );
 
   let truncated = cleaned;
   while (Buffer.byteLength(truncated, "utf8") > maxBytes - 3) {
     truncated = truncated.slice(0, -1);
   }
 
-  return truncated.trim() + "...";
+  truncated = truncated.trim() + "...";
+  console.log(
+    `✅ Truncated to: ${truncated} (${Buffer.byteLength(
+      truncated,
+      "utf8"
+    )} bytes)`
+  );
+
+  return truncated;
 }
 
 function formatFileSize(bytes) {
-  let numBytes = typeof bytes === "bigint" ? Number(bytes) : bytes;
-  
+  let numBytes;
+
+  if (typeof bytes === "bigint") {
+    numBytes = Number(bytes);
+  } else if (typeof bytes === "number") {
+    numBytes = bytes;
+  } else {
+    return "0 Bytes";
+  }
+
   if (!numBytes || numBytes === 0 || isNaN(numBytes)) {
     return "0 Bytes";
   }
@@ -154,12 +164,18 @@ function formatDuration(seconds) {
 }
 
 function createProgressBar(percentage) {
-  const validPercentage = Math.min(Math.max(percentage || 0, 0), 100);
+  const validPercentage = isNaN(percentage)
+    ? 0
+    : Math.min(Math.max(percentage, 0), 100);
+
   const totalCubes = 10;
   const filledCubes = Math.floor((validPercentage / 100) * totalCubes);
   const emptyCubes = totalCubes - filledCubes;
 
-  return `${"🟦".repeat(filledCubes)}${"⬜".repeat(emptyCubes)} ${validPercentage}%`;
+  const filled = "🟦".repeat(filledCubes);
+  const empty = "⬜".repeat(emptyCubes);
+
+  return `${filled}${empty} ${validPercentage}%`;
 }
 
 async function downloadThumbnailToBuffer(thumbnailUrl) {
@@ -170,7 +186,8 @@ async function downloadThumbnailToBuffer(thumbnailUrl) {
       responseType: "arraybuffer",
       timeout: 15000,
       headers: {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "User-Agent":
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
       },
     });
     return Buffer.from(response.data);
@@ -182,7 +199,9 @@ async function downloadThumbnailToBuffer(thumbnailUrl) {
 
 function getBestThumbnail(thumbnails) {
   if (!thumbnails || thumbnails.length === 0) return null;
-  const maxRes = thumbnails.find((t) => t.url && t.url.includes("maxresdefault"));
+  const maxRes = thumbnails.find(
+    (t) => t.url && t.url.includes("maxresdefault")
+  );
   if (maxRes) return maxRes.url;
   const sorted = thumbnails
     .filter((t) => t.url)
@@ -190,13 +209,14 @@ function getBestThumbnail(thumbnails) {
   return sorted[0]?.url || null;
 }
 
-async function retryOperation(operation, maxRetries = 3, initialDelay = 2000) {
+// Retry helper function with exponential backoff
+async function retryOperation(operation, maxRetries = 3, initialDelay = 3000) {
   for (let i = 0; i < maxRetries; i++) {
     try {
       return await operation();
     } catch (error) {
       if (i === maxRetries - 1) throw error;
-      const delay = initialDelay * Math.pow(2, i);
+      const delay = initialDelay * Math.pow(2, i); // Exponential backoff
       console.log(`⚠️ Attempt ${i + 1} failed, retrying in ${delay}ms...`);
       console.log(`   Error: ${error.message}`);
       await new Promise((resolve) => setTimeout(resolve, delay));
@@ -217,8 +237,8 @@ async function getVideoInfo(url) {
           ...getYtDlpOptions(),
         });
       },
-      2, // Reduce retries
-      2000
+      3,
+      3000
     );
 
     let thumbnailUrl = info.thumbnail;
@@ -238,27 +258,29 @@ async function getVideoInfo(url) {
   } catch (error) {
     console.error("❌ getVideoInfo error:", error.message);
 
-    if (error.message.includes("bot") || error.message.includes("Sign in") || error.message.includes("429")) {
-      throw new Error("⚠️ YouTube temporarily blocked the request.\n\nPlease wait 5-10 minutes and try again.");
+    // Better error messages
+    if (error.message.includes("bot") || error.message.includes("Sign in")) {
+      throw new Error(
+        "⚠️ YouTube bot detection! Please add cookies.txt file.\n\nSee /help for instructions."
+      );
     } else if (error.message.includes("Private video")) {
       throw new Error("This is a private video.");
     } else if (error.message.includes("available")) {
       throw new Error("Video not available.");
+    } else if (error.message.includes("copyright")) {
+      throw new Error("Video blocked due to copyright.");
     }
 
     throw new Error(`Failed to get video info: ${error.message}`);
   }
 }
 
-// ✅ USE YOUTUBEI.JS FOR PLAYLISTS (More reliable)
 async function getPlaylistVideos(playlistId, chatId, messageId) {
   try {
     const loadingMsg = await client.sendMessage(chatId, {
       message: "🔍 Fetching playlist videos...",
       replyTo: messageId,
     });
-
-    console.log("📝 Using youtubei.js for playlist...");
 
     const yt = await Innertube.create();
     let playlist = await yt.getPlaylist(playlistId);
@@ -281,8 +303,8 @@ async function getPlaylistVideos(playlistId, chatId, messageId) {
     }
 
     const videos = allVideos.map((v) => ({
-      title: v.title.text || "Unknown",
-      thumbnail: v.thumbnails[0]?.url || null,
+      title: v.title.text,
+      thumbnail: v.thumbnails[0]?.url,
       url: `https://www.youtube.com/watch?v=${v.id}`,
     }));
 
@@ -292,7 +314,7 @@ async function getPlaylistVideos(playlistId, chatId, messageId) {
     return videos;
   } catch (error) {
     console.error("Playlist fetch error:", error);
-    throw new Error("Failed to fetch playlist. Please try again later.");
+    throw new Error("Failed to fetch playlist");
   }
 }
 
@@ -328,19 +350,6 @@ function createQualityButtons(cacheKey, isPlaylist = false) {
   ];
 }
 
-async function fixVideoForStreaming(inputPath, outputPath) {
-  try {
-    console.log("🔧 Fixing video for streaming...");
-    const command = `"${ffmpegPath.path}" -i "${inputPath}" -c copy -movflags +faststart -y "${outputPath}"`;
-    await execPromise(command);
-    console.log("✅ Video fixed for streaming");
-    return true;
-  } catch (error) {
-    console.error("⚠️ Video fix failed:", error.message);
-    return false;
-  }
-}
-
 async function downloadMP3(url, chatId, messageId, statusMessage) {
   let audioPath = null;
   let thumbPath = null;
@@ -369,16 +378,15 @@ async function downloadMP3(url, chatId, messageId, statusMessage) {
     console.log("⬇️ Starting MP3 download...");
     console.log(`📁 Filename: ${sanitizedTitle}.mp3`);
 
-const downloadPromise = youtubedl(url, {
-  extractAudio: true,
-  audioFormat: "mp3",
-  audioQuality: 0,
-  output: audioPath,
-  noPlaylist: true,
-  extractorArgs: "youtube:player_client=ios,web", // ✅ Correct option
-  ffmpegLocation: ffmpegPath.path,
-  ...getYtDlpOptions(),
-});
+    const downloadPromise = youtubedl(url, {
+      extractAudio: true,
+      audioFormat: "mp3",
+      audioQuality: 0,
+      output: audioPath,
+      noPlaylist: true,
+      ffmpegLocation: ffmpegPath.path, // ✅ ADD THIS LINE
+      ...getYtDlpOptions(),
+    });
 
     const progressInterval = setInterval(async () => {
       const now = Date.now();
@@ -552,6 +560,29 @@ const downloadPromise = youtubedl(url, {
   }
 }
 
+// ✅ ADD THIS NEW FUNCTION
+import { promisify } from "util";
+import { exec } from "child_process";
+const execPromise = promisify(exec);
+
+async function fixVideoForStreaming(inputPath, outputPath) {
+  try {
+    console.log("🔧 Fixing video for streaming...");
+
+    // Use FFmpeg to move MOOV atom to beginning for streaming
+    const command = `"${ffmpegPath.path}" -i "${inputPath}" -c copy -movflags +faststart -y "${outputPath}"`;
+
+    await execPromise(command);
+
+    console.log("✅ Video fixed for streaming");
+    return true;
+  } catch (error) {
+    console.error("⚠️ Video fix failed:", error.message);
+    // If fix fails, use original file
+    return false;
+  }
+}
+
 async function downloadVideo(url, chatId, messageId, quality, statusMessage) {
   let videoPath = null;
   let thumbPath = null;
@@ -618,14 +649,13 @@ async function downloadVideo(url, chatId, messageId, quality, statusMessage) {
     console.log(`⬇️ Starting ${qualityLabel} video download...`);
     console.log(`📁 Filename: ${sanitizedTitle}.mp4`);
 
-const downloadPromise = youtubedl(url, {
-  format: formatString,
-  output: videoPath,
-  noPlaylist: true,
-  mergeOutputFormat: "mp4",
-  extractorArgs: "youtube:player_client=ios,web", // ✅ Correct option
-  ...getYtDlpOptions(),
-});
+    const downloadPromise = youtubedl(url, {
+      format: formatString,
+      output: videoPath,
+      noPlaylist: true,
+      mergeOutputFormat: "mp4",
+      ...getYtDlpOptions(),
+    });
 
     const progressInterval = setInterval(async () => {
       const now = Date.now();
