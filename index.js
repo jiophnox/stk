@@ -11,11 +11,12 @@ import { dirname } from "path";
 import { Api } from "telegram";
 import express from "express";
 import { Innertube } from "youtubei.js";
-
-// ✅ ADD FFMPEG SUPPORT
-// install by # Terminal में run करो: npm install @ffmpeg-installer/ffmpeg @ffprobe-installer/ffprobe
 import ffmpegPath from "@ffmpeg-installer/ffmpeg";
 import ffprobePath from "@ffprobe-installer/ffprobe";
+import { promisify } from "util";
+import { exec } from "child_process";
+
+const execPromise = promisify(exec);
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -25,7 +26,6 @@ const __dirname = dirname(__filename);
 
 dotenv.config();
 
-// ✅ SET FFMPEG PATHS
 process.env.FFMPEG_PATH = ffmpegPath.path;
 process.env.FFPROBE_PATH = ffprobePath.path;
 
@@ -36,6 +36,10 @@ const API_ID = parseInt(process.env.API_ID);
 const API_HASH = process.env.API_HASH;
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const MAX_FILE_SIZE = parseInt(process.env.MAX_FILE_SIZE) || 2000;
+
+// ✅ PROXY CONFIGURATION
+const USE_PROXY = process.env.USE_PROXY === "true" || true; // Auto-enable
+const PROXY_URL = process.env.PROXY_URL || null; // Optional: custom proxy
 
 const stringSession = new StringSession("");
 
@@ -52,67 +56,71 @@ const activeDownloads = new Map();
 const urlCache = new Map();
 const playlistCache = new Map();
 
-// ✅ BETTER COOKIE FILE HANDLING
 const cookiesPath = path.join(__dirname, "cookies.txt");
 const hasCookies = fs.existsSync(cookiesPath);
 
 if (hasCookies) {
-  console.log("✅ Cookies file found at:", cookiesPath);
-  
-  // ✅ CHECK FILE PERMISSIONS & CONTENT
-  try {
-    const stats = fs.statSync(cookiesPath);
-    const content = fs.readFileSync(cookiesPath, 'utf8');
-    
-    console.log("📊 Cookie file size:", stats.size, "bytes");
-    console.log("📊 Cookie lines:", content.split('\n').length);
-    console.log("📊 File permissions:", stats.mode.toString(8));
-    
-    // Verify it's actually YouTube cookies
-    if (content.includes('youtube.com')) {
-      console.log("✅ YouTube cookies detected!");
-    } else {
-      console.log("⚠️  Warning: No YouTube cookies found in file");
-    }
-    
-    // Check for expired cookies
-    const lines = content.split('\n').filter(l => !l.startsWith('#') && l.trim());
-    console.log("📊 Valid cookie lines:", lines.length);
-    
-  } catch (error) {
-    console.log("❌ Cookie file read error:", error.message);
-  }
+  console.log("✅ Cookies file found!");
 } else {
-  console.log("⚠️  No cookies.txt file found. Some videos may not work.");
+  console.log("⚠️  No cookies.txt file found.");
 }
 
+// ✅ PROXY LIST (Free proxies - rotate karte rahenge)
+const FREE_PROXIES = [
+  "http://proxy.toolip.gr:31288",
+  "http://207.180.193.106:3128",
+  "http://103.167.171.150:8181",
+  "http://198.49.68.80:80",
+  "http://47.88.62.42:80",
+];
+
+let currentProxyIndex = 0;
+
+function getRandomProxy() {
+  if (PROXY_URL) {
+    console.log("🔐 Using custom proxy:", PROXY_URL);
+    return PROXY_URL;
+  }
+  
+  const proxy = FREE_PROXIES[currentProxyIndex];
+  currentProxyIndex = (currentProxyIndex + 1) % FREE_PROXIES.length;
+  console.log("🔐 Using proxy:", proxy);
+  return proxy;
+}
+
+// ✅ GENERATE RANDOM IP HEADER
+function getRandomIP() {
+  return `${Math.floor(Math.random() * 255)}.${Math.floor(Math.random() * 255)}.${Math.floor(Math.random() * 255)}.${Math.floor(Math.random() * 255)}`;
+}
+
+// ✅ IMPROVED YT-DLP OPTIONS WITH PROXY
 function getYtDlpOptions() {
+  const randomIP = getRandomIP();
+  
   const options = {
+    noWarnings: true,
     noCheckCertificate: true,
     preferFreeFormats: true,
-    
-    // ✅ CORRECT: Use hyphen, not underscore
-    extractorArgs: "youtube:player_client=ios,web",
-    
     addHeader: [
       "User-Agent:Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
       "Accept:text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
       "Accept-Language:en-us,en;q=0.5",
       "Sec-Fetch-Mode:navigate",
+      `X-Forwarded-For:${randomIP}`, // ✅ Fake IP header
+      `X-Real-IP:${randomIP}`,
     ],
   };
 
+  // ✅ ADD PROXY
+  if (USE_PROXY) {
+    const proxy = getRandomProxy();
+    options.proxy = proxy;
+    console.log("🌐 Using IP spoofing:", randomIP);
+  }
+
+  // ✅ ADD COOKIES
   if (hasCookies) {
-    const absoluteCookiePath = path.resolve(cookiesPath);
-    console.log("🍪 Using cookies from:", absoluteCookiePath);
-    
-    try {
-      fs.accessSync(absoluteCookiePath, fs.constants.R_OK);
-      options.cookies = absoluteCookiePath;
-      console.log("✅ Cookies file is readable and added to options");
-    } catch (error) {
-      console.log("❌ Cannot read cookies file:", error.message);
-    }
+    options.cookies = cookiesPath;
   }
 
   return options;
@@ -133,22 +141,15 @@ function extractPlaylistId(url) {
 }
 
 function sanitizeFilename(filename, maxBytes = 240) {
-  // Remove invalid filesystem characters
   let cleaned = filename.replace(/[/\\?%*:|"<>]/g, "-");
-
-  // Check byte length (important for UTF-8/Hindi)
   const byteLength = Buffer.byteLength(cleaned, "utf8");
 
-  // If within safe limit, return full title
   if (byteLength <= maxBytes) {
     console.log(`✅ Full filename: ${cleaned} (${byteLength} bytes)`);
     return cleaned;
   }
 
-  // Truncate safely at byte boundary
-  console.log(
-    `⚠️ Truncating: ${cleaned.substring(0, 50)}... (${byteLength} bytes)`
-  );
+  console.log(`⚠️ Truncating: ${cleaned.substring(0, 50)}... (${byteLength} bytes)`);
 
   let truncated = cleaned;
   while (Buffer.byteLength(truncated, "utf8") > maxBytes - 3) {
@@ -156,12 +157,7 @@ function sanitizeFilename(filename, maxBytes = 240) {
   }
 
   truncated = truncated.trim() + "...";
-  console.log(
-    `✅ Truncated to: ${truncated} (${Buffer.byteLength(
-      truncated,
-      "utf8"
-    )} bytes)`
-  );
+  console.log(`✅ Truncated to: ${truncated} (${Buffer.byteLength(truncated, "utf8")} bytes)`);
 
   return truncated;
 }
@@ -213,14 +209,16 @@ function createProgressBar(percentage) {
 
 async function downloadThumbnailToBuffer(thumbnailUrl) {
   try {
+    const randomIP = getRandomIP();
     const response = await axios({
       url: thumbnailUrl,
       method: "GET",
       responseType: "arraybuffer",
       timeout: 15000,
       headers: {
-        "User-Agent":
-          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "X-Forwarded-For": randomIP,
+        "X-Real-IP": randomIP,
       },
     });
     return Buffer.from(response.data);
@@ -232,9 +230,7 @@ async function downloadThumbnailToBuffer(thumbnailUrl) {
 
 function getBestThumbnail(thumbnails) {
   if (!thumbnails || thumbnails.length === 0) return null;
-  const maxRes = thumbnails.find(
-    (t) => t.url && t.url.includes("maxresdefault")
-  );
+  const maxRes = thumbnails.find((t) => t.url && t.url.includes("maxresdefault"));
   if (maxRes) return maxRes.url;
   const sorted = thumbnails
     .filter((t) => t.url)
@@ -242,16 +238,21 @@ function getBestThumbnail(thumbnails) {
   return sorted[0]?.url || null;
 }
 
-// Retry helper function with exponential backoff
 async function retryOperation(operation, maxRetries = 3, initialDelay = 3000) {
   for (let i = 0; i < maxRetries; i++) {
     try {
       return await operation();
     } catch (error) {
       if (i === maxRetries - 1) throw error;
-      const delay = initialDelay * Math.pow(2, i); // Exponential backoff
+      const delay = initialDelay * Math.pow(2, i);
       console.log(`⚠️ Attempt ${i + 1} failed, retrying in ${delay}ms...`);
       console.log(`   Error: ${error.message}`);
+      
+      // ✅ Rotate proxy on failure
+      if (USE_PROXY) {
+        console.log("🔄 Rotating proxy...");
+      }
+      
       await new Promise((resolve) => setTimeout(resolve, delay));
     }
   }
@@ -261,19 +262,17 @@ async function getVideoInfo(url) {
   try {
     console.log("🔍 Fetching video info for:", url);
 
-    // ✅ DIRECT YT-DLP APPROACH (Most reliable)
     const info = await retryOperation(
       async () => {
         return await youtubedl(url, {
           dumpSingleJson: true,
           skipDownload: true,
           noPlaylist: true,
-          extractorArgs: "youtube:player_client=ios,web",
           ...getYtDlpOptions(),
         });
       },
       3,
-      5000 // Increased delay between retries
+      3000
     );
 
     let thumbnailUrl = info.thumbnail;
@@ -293,18 +292,9 @@ async function getVideoInfo(url) {
   } catch (error) {
     console.error("❌ getVideoInfo error:", error.message);
 
-    if (
-      error.message.includes("bot") ||
-      error.message.includes("Sign in") ||
-      error.message.includes("429")
-    ) {
+    if (error.message.includes("bot") || error.message.includes("Sign in")) {
       throw new Error(
-        "⚠️ YouTube rate limit or bot detection!\n\n" +
-        "Solutions:\n" +
-        "1. Wait 10-15 minutes\n" +
-        "2. Export fresh cookies\n" +
-        "3. Try a different video\n" +
-        "4. Use VPN if available"
+        "⚠️ YouTube bot detection! Trying with proxy...\n\nIf this persists, try again in 5 minutes."
       );
     } else if (error.message.includes("Private video")) {
       throw new Error("This is a private video.");
