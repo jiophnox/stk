@@ -16,6 +16,7 @@ import ffprobePath from "@ffprobe-installer/ffprobe";
 import { promisify } from "util";
 import { exec } from "child_process";
 
+// ✅ ALL IMPORTS AT TOP
 const execPromise = promisify(exec);
 
 const app = express();
@@ -38,8 +39,8 @@ const BOT_TOKEN = process.env.BOT_TOKEN;
 const MAX_FILE_SIZE = parseInt(process.env.MAX_FILE_SIZE) || 2000;
 
 // ✅ PROXY CONFIGURATION
-const USE_PROXY = process.env.USE_PROXY === "true" || true; // Auto-enable
-const PROXY_URL = process.env.PROXY_URL || null; // Optional: custom proxy
+const USE_PROXY = process.env.USE_PROXY === "true" || true;
+const PROXY_URL = process.env.PROXY_URL || null;
 
 const stringSession = new StringSession("");
 
@@ -65,7 +66,7 @@ if (hasCookies) {
   console.log("⚠️  No cookies.txt file found.");
 }
 
-// ✅ PROXY LIST (Free proxies - rotate karte rahenge)
+// ✅ PROXY LIST
 const FREE_PROXIES = [
   "http://proxy.toolip.gr:31288",
   "http://207.180.193.106:3128",
@@ -88,12 +89,10 @@ function getRandomProxy() {
   return proxy;
 }
 
-// ✅ GENERATE RANDOM IP HEADER
 function getRandomIP() {
   return `${Math.floor(Math.random() * 255)}.${Math.floor(Math.random() * 255)}.${Math.floor(Math.random() * 255)}.${Math.floor(Math.random() * 255)}`;
 }
 
-// ✅ IMPROVED YT-DLP OPTIONS WITH PROXY
 function getYtDlpOptions() {
   const randomIP = getRandomIP();
   
@@ -106,19 +105,17 @@ function getYtDlpOptions() {
       "Accept:text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
       "Accept-Language:en-us,en;q=0.5",
       "Sec-Fetch-Mode:navigate",
-      `X-Forwarded-For:${randomIP}`, // ✅ Fake IP header
+      `X-Forwarded-For:${randomIP}`,
       `X-Real-IP:${randomIP}`,
     ],
   };
 
-  // ✅ ADD PROXY
   if (USE_PROXY) {
     const proxy = getRandomProxy();
     options.proxy = proxy;
     console.log("🌐 Using IP spoofing:", randomIP);
   }
 
-  // ✅ ADD COOKIES
   if (hasCookies) {
     options.cookies = cookiesPath;
   }
@@ -145,34 +142,20 @@ function sanitizeFilename(filename, maxBytes = 240) {
   const byteLength = Buffer.byteLength(cleaned, "utf8");
 
   if (byteLength <= maxBytes) {
-    console.log(`✅ Full filename: ${cleaned} (${byteLength} bytes)`);
     return cleaned;
   }
-
-  console.log(`⚠️ Truncating: ${cleaned.substring(0, 50)}... (${byteLength} bytes)`);
 
   let truncated = cleaned;
   while (Buffer.byteLength(truncated, "utf8") > maxBytes - 3) {
     truncated = truncated.slice(0, -1);
   }
 
-  truncated = truncated.trim() + "...";
-  console.log(`✅ Truncated to: ${truncated} (${Buffer.byteLength(truncated, "utf8")} bytes)`);
-
-  return truncated;
+  return truncated.trim() + "...";
 }
 
 function formatFileSize(bytes) {
-  let numBytes;
-
-  if (typeof bytes === "bigint") {
-    numBytes = Number(bytes);
-  } else if (typeof bytes === "number") {
-    numBytes = bytes;
-  } else {
-    return "0 Bytes";
-  }
-
+  let numBytes = typeof bytes === "bigint" ? Number(bytes) : bytes;
+  
   if (!numBytes || numBytes === 0 || isNaN(numBytes)) {
     return "0 Bytes";
   }
@@ -193,18 +176,12 @@ function formatDuration(seconds) {
 }
 
 function createProgressBar(percentage) {
-  const validPercentage = isNaN(percentage)
-    ? 0
-    : Math.min(Math.max(percentage, 0), 100);
-
+  const validPercentage = Math.min(Math.max(percentage || 0, 0), 100);
   const totalCubes = 10;
   const filledCubes = Math.floor((validPercentage / 100) * totalCubes);
   const emptyCubes = totalCubes - filledCubes;
 
-  const filled = "🟦".repeat(filledCubes);
-  const empty = "⬜".repeat(emptyCubes);
-
-  return `${filled}${empty} ${validPercentage}%`;
+  return `${"🟦".repeat(filledCubes)}${"⬜".repeat(emptyCubes)} ${validPercentage}%`;
 }
 
 async function downloadThumbnailToBuffer(thumbnailUrl) {
@@ -246,9 +223,7 @@ async function retryOperation(operation, maxRetries = 3, initialDelay = 3000) {
       if (i === maxRetries - 1) throw error;
       const delay = initialDelay * Math.pow(2, i);
       console.log(`⚠️ Attempt ${i + 1} failed, retrying in ${delay}ms...`);
-      console.log(`   Error: ${error.message}`);
       
-      // ✅ Rotate proxy on failure
       if (USE_PROXY) {
         console.log("🔄 Rotating proxy...");
       }
@@ -293,15 +268,11 @@ async function getVideoInfo(url) {
     console.error("❌ getVideoInfo error:", error.message);
 
     if (error.message.includes("bot") || error.message.includes("Sign in")) {
-      throw new Error(
-        "⚠️ YouTube bot detection! Trying with proxy...\n\nIf this persists, try again in 5 minutes."
-      );
+      throw new Error("⚠️ YouTube bot detection! Trying with proxy...");
     } else if (error.message.includes("Private video")) {
       throw new Error("This is a private video.");
     } else if (error.message.includes("available")) {
       throw new Error("Video not available.");
-    } else if (error.message.includes("copyright")) {
-      throw new Error("Video blocked due to copyright.");
     }
 
     throw new Error(`Failed to get video info: ${error.message}`);
@@ -317,18 +288,10 @@ async function getPlaylistVideos(playlistId, chatId, messageId) {
 
     const playlistUrl = `https://www.youtube.com/playlist?list=${playlistId}`;
 
-    console.log("📝 Fetching playlist with yt-dlp...");
-
-    // ✅ USE YT-DLP INSTEAD OF YOUTUBEI.JS
     const playlistInfo = await youtubedl(playlistUrl, {
       dumpSingleJson: true,
       flatPlaylist: true,
-      extractorArgs: "youtube:player_client=ios,web",
       ...getYtDlpOptions(),
-    });
-
-    await loadingMsg.edit({
-      text: `🔍 Processing playlist...\n📊 Found: ${playlistInfo.entries.length} videos`,
     });
 
     const videos = playlistInfo.entries.map((v) => ({
@@ -377,6 +340,20 @@ function createQualityButtons(cacheKey, isPlaylist = false) {
       }),
     ],
   ];
+}
+
+// ✅ FIX VIDEO STREAMING FUNCTION (NO DUPLICATE IMPORTS)
+async function fixVideoForStreaming(inputPath, outputPath) {
+  try {
+    console.log("🔧 Fixing video for streaming...");
+    const command = `"${ffmpegPath.path}" -i "${inputPath}" -c copy -movflags +faststart -y "${outputPath}"`;
+    await execPromise(command);
+    console.log("✅ Video fixed for streaming");
+    return true;
+  } catch (error) {
+    console.error("⚠️ Video fix failed:", error.message);
+    return false;
+  }
 }
 
 async function downloadMP3(url, chatId, messageId, statusMessage) {
@@ -587,29 +564,6 @@ const downloadPromise = youtubedl(url, {
   } catch (error) {
     console.error("❌ Error:", error.message);
     throw error;
-  }
-}
-
-// ✅ ADD THIS NEW FUNCTION
-import { promisify } from "util";
-import { exec } from "child_process";
-const execPromise = promisify(exec);
-
-async function fixVideoForStreaming(inputPath, outputPath) {
-  try {
-    console.log("🔧 Fixing video for streaming...");
-
-    // Use FFmpeg to move MOOV atom to beginning for streaming
-    const command = `"${ffmpegPath.path}" -i "${inputPath}" -c copy -movflags +faststart -y "${outputPath}"`;
-
-    await execPromise(command);
-
-    console.log("✅ Video fixed for streaming");
-    return true;
-  } catch (error) {
-    console.error("⚠️ Video fix failed:", error.message);
-    // If fix fails, use original file
-    return false;
   }
 }
 
