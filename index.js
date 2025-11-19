@@ -16,7 +16,6 @@ import ffprobePath from "@ffprobe-installer/ffprobe";
 import { promisify } from "util";
 import { exec } from "child_process";
 
-// ✅ ALL IMPORTS AT TOP
 const execPromise = promisify(exec);
 
 const app = express();
@@ -38,8 +37,8 @@ const API_HASH = process.env.API_HASH;
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const MAX_FILE_SIZE = parseInt(process.env.MAX_FILE_SIZE) || 2000;
 
-// ✅ PROXY CONFIGURATION
-const USE_PROXY = process.env.USE_PROXY === "true" || true;
+// ✅ DISABLE PROXY BY DEFAULT (can enable via env)
+const USE_PROXY = process.env.USE_PROXY === "true" && false; // Force disable
 const PROXY_URL = process.env.PROXY_URL || null;
 
 const stringSession = new StringSession("");
@@ -66,33 +65,12 @@ if (hasCookies) {
   console.log("⚠️  No cookies.txt file found.");
 }
 
-// ✅ PROXY LIST
-const FREE_PROXIES = [
-  "http://proxy.toolip.gr:31288",
-  "http://207.180.193.106:3128",
-  "http://103.167.171.150:8181",
-  "http://198.49.68.80:80",
-  "http://47.88.62.42:80",
-];
-
-let currentProxyIndex = 0;
-
-function getRandomProxy() {
-  if (PROXY_URL) {
-    console.log("🔐 Using custom proxy:", PROXY_URL);
-    return PROXY_URL;
-  }
-  
-  const proxy = FREE_PROXIES[currentProxyIndex];
-  currentProxyIndex = (currentProxyIndex + 1) % FREE_PROXIES.length;
-  console.log("🔐 Using proxy:", proxy);
-  return proxy;
-}
-
+// ✅ GENERATE RANDOM IP (for headers only, not actual proxy)
 function getRandomIP() {
-  return `${Math.floor(Math.random() * 255)}.${Math.floor(Math.random() * 255)}.${Math.floor(Math.random() * 255)}.${Math.floor(Math.random() * 255)}`;
+  return `${Math.floor(Math.random() * 223) + 1}.${Math.floor(Math.random() * 255)}.${Math.floor(Math.random() * 255)}.${Math.floor(Math.random() * 255)}`;
 }
 
+// ✅ IMPROVED OPTIONS - NO PROXY
 function getYtDlpOptions() {
   const randomIP = getRandomIP();
   
@@ -110,10 +88,10 @@ function getYtDlpOptions() {
     ],
   };
 
-  if (USE_PROXY) {
-    const proxy = getRandomProxy();
-    options.proxy = proxy;
-    console.log("🌐 Using IP spoofing:", randomIP);
+  // ✅ ONLY USE PROXY IF EXPLICITLY ENABLED AND PROVIDED
+  if (USE_PROXY && PROXY_URL) {
+    options.proxy = PROXY_URL;
+    console.log("🔐 Using custom proxy:", PROXY_URL);
   }
 
   if (hasCookies) {
@@ -186,7 +164,6 @@ function createProgressBar(percentage) {
 
 async function downloadThumbnailToBuffer(thumbnailUrl) {
   try {
-    const randomIP = getRandomIP();
     const response = await axios({
       url: thumbnailUrl,
       method: "GET",
@@ -194,8 +171,6 @@ async function downloadThumbnailToBuffer(thumbnailUrl) {
       timeout: 15000,
       headers: {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-        "X-Forwarded-For": randomIP,
-        "X-Real-IP": randomIP,
       },
     });
     return Buffer.from(response.data);
@@ -215,7 +190,7 @@ function getBestThumbnail(thumbnails) {
   return sorted[0]?.url || null;
 }
 
-async function retryOperation(operation, maxRetries = 3, initialDelay = 3000) {
+async function retryOperation(operation, maxRetries = 3, initialDelay = 2000) {
   for (let i = 0; i < maxRetries; i++) {
     try {
       return await operation();
@@ -223,11 +198,7 @@ async function retryOperation(operation, maxRetries = 3, initialDelay = 3000) {
       if (i === maxRetries - 1) throw error;
       const delay = initialDelay * Math.pow(2, i);
       console.log(`⚠️ Attempt ${i + 1} failed, retrying in ${delay}ms...`);
-      
-      if (USE_PROXY) {
-        console.log("🔄 Rotating proxy...");
-      }
-      
+      console.log(`   Error: ${error.message}`);
       await new Promise((resolve) => setTimeout(resolve, delay));
     }
   }
@@ -246,8 +217,8 @@ async function getVideoInfo(url) {
           ...getYtDlpOptions(),
         });
       },
-      3,
-      3000
+      2, // Reduce retries
+      2000
     );
 
     let thumbnailUrl = info.thumbnail;
@@ -267,8 +238,8 @@ async function getVideoInfo(url) {
   } catch (error) {
     console.error("❌ getVideoInfo error:", error.message);
 
-    if (error.message.includes("bot") || error.message.includes("Sign in")) {
-      throw new Error("⚠️ YouTube bot detection! Trying with proxy...");
+    if (error.message.includes("bot") || error.message.includes("Sign in") || error.message.includes("429")) {
+      throw new Error("⚠️ YouTube temporarily blocked the request.\n\nPlease wait 5-10 minutes and try again.");
     } else if (error.message.includes("Private video")) {
       throw new Error("This is a private video.");
     } else if (error.message.includes("available")) {
@@ -279,6 +250,7 @@ async function getVideoInfo(url) {
   }
 }
 
+// ✅ USE YOUTUBEI.JS FOR PLAYLISTS (More reliable)
 async function getPlaylistVideos(playlistId, chatId, messageId) {
   try {
     const loadingMsg = await client.sendMessage(chatId, {
@@ -286,18 +258,32 @@ async function getPlaylistVideos(playlistId, chatId, messageId) {
       replyTo: messageId,
     });
 
-    const playlistUrl = `https://www.youtube.com/playlist?list=${playlistId}`;
+    console.log("📝 Using youtubei.js for playlist...");
 
-    const playlistInfo = await youtubedl(playlistUrl, {
-      dumpSingleJson: true,
-      flatPlaylist: true,
-      ...getYtDlpOptions(),
-    });
+    const yt = await Innertube.create();
+    let playlist = await yt.getPlaylist(playlistId);
 
-    const videos = playlistInfo.entries.map((v) => ({
-      title: v.title || "Unknown",
-      thumbnail: v.thumbnail || null,
-      url: v.url || `https://www.youtube.com/watch?v=${v.id}`,
+    const allVideos = [];
+    allVideos.push(...playlist.videos);
+
+    let lastUpdate = Date.now();
+    while (playlist.has_continuation) {
+      playlist = await playlist.getContinuation();
+      allVideos.push(...playlist.videos);
+
+      const now = Date.now();
+      if (now - lastUpdate >= 3000) {
+        lastUpdate = now;
+        await loadingMsg.edit({
+          text: `🔍 Fetching playlist videos...\n📊 Loaded: ${allVideos.length} videos`,
+        });
+      }
+    }
+
+    const videos = allVideos.map((v) => ({
+      title: v.title.text || "Unknown",
+      thumbnail: v.thumbnails[0]?.url || null,
+      url: `https://www.youtube.com/watch?v=${v.id}`,
     }));
 
     await loadingMsg.delete({ revoke: true });
@@ -306,7 +292,7 @@ async function getPlaylistVideos(playlistId, chatId, messageId) {
     return videos;
   } catch (error) {
     console.error("Playlist fetch error:", error);
-    throw new Error("Failed to fetch playlist: " + error.message);
+    throw new Error("Failed to fetch playlist. Please try again later.");
   }
 }
 
@@ -342,7 +328,6 @@ function createQualityButtons(cacheKey, isPlaylist = false) {
   ];
 }
 
-// ✅ FIX VIDEO STREAMING FUNCTION (NO DUPLICATE IMPORTS)
 async function fixVideoForStreaming(inputPath, outputPath) {
   try {
     console.log("🔧 Fixing video for streaming...");
