@@ -748,6 +748,120 @@ router.get("/channel/info", async (req, res) => {
   }
 });
 
+const playlistCache = new Map();
+let ytInstance = null;
+
+async function initYouTube() {
+  if (ytInstance) return ytInstance;
+  ytInstance = await Innertube.create({ retrieve_player: false });
+  console.log('✅ YouTube instance initialized');
+  return ytInstance;
+}
+
+function extractPlaylistId(input) {
+  if (!input) return null;
+  if (/^[a-zA-Z0-9_-]+$/.test(input) && input.length > 10) {
+    return input;
+  }
+  try {
+    const url = new URL(input);
+    return url.searchParams.get('list');
+  } catch {
+    const match = input.match(/[?&]list=([a-zA-Z0-9_-]+)/);
+    return match ? match[1] : null;
+  }
+}
+
+async function getPlaylist(playlistId) {
+  if (playlistCache.has(playlistId)) {
+    console.log(`✅ Cache hit: ${playlistId}`);
+    return playlistCache.get(playlistId);
+  }
+
+  console.log(`🔄 Fetching: ${playlistId}`);
+  const yt = await initYouTube();
+  let playlist = await yt.getPlaylist(playlistId);
+
+  const allVideos = [];
+  allVideos.push(...playlist.videos);
+
+  while (playlist.has_continuation) {
+    playlist = await playlist.getContinuation();
+    allVideos.push(...playlist.videos);
+    console.log(`Progress: ${allVideos.length} videos`);
+  }
+
+  const videoData = {
+    id: playlistId,
+    title: playlist.info?.title || 'Playlist',
+    videoCount: allVideos.length,
+    videos: allVideos.map(v => ({
+      id: v.id,
+      title: v.title?.text || 'Unknown',
+      img: v.thumbnails?.[0]?.url || '',
+      duration: v.duration?.text || 'N/A',
+      author: v.author?.name || 'Unknown'
+    }))
+  };
+
+  playlistCache.set(playlistId, videoData);
+  console.log(`✅ Cached ${videoData.videos.length} videos`);
+  return videoData;
+}
+
+
+router.get('/playlist', async (req, res) => {
+  try {
+    const playlistId = extractPlaylistId(req.query.id || req.query.list);
+    if (!playlistId) {
+      return res.status(400).json({ success: false, error: 'Invalid playlist ID' });
+    }
+
+    const data = await getPlaylist(playlistId);
+    res.json({
+      success: true,
+      data: { id: data.id, title: data.title, videoCount: data.videoCount }
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+router.get('/videos', async (req, res) => {
+  try {
+    const playlistId = extractPlaylistId(req.query.list || req.query.playlist);
+    if (!playlistId) {
+      return res.status(400).json({ success: false, error: 'Playlist ID required' });
+    }
+
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 20;
+
+    const data = await getPlaylist(playlistId);
+    const videos = data.videos;
+
+    const startIndex = (page - 1) * limit;
+    const endIndex = page * limit;
+    const paginatedVideos = videos.slice(startIndex, endIndex);
+
+    res.json({
+      success: true,
+      data: paginatedVideos,
+      playlist: { id: data.id, title: data.title, videoCount: data.videoCount },
+      pagination: {
+        currentPage: page,
+        totalPages: Math.ceil(videos.length / limit),
+        totalVideos: videos.length,
+        videosPerPage: limit,
+        hasNext: endIndex < videos.length,
+        hasPrev: page > 1
+      }
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
 export default router;
 
 // ═══════════════════════════════════════════════════════════════
