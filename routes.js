@@ -4,6 +4,7 @@ import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
 import { dirname } from "path";
+import { Innertube } from "youtubei.js"; // ✅ ADD THIS IMPORT
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -12,6 +13,33 @@ const router = express.Router();
 
 const cookiesPath = path.join(__dirname, "cookies.txt");
 const hasCookies = fs.existsSync(cookiesPath);
+
+// ✅ Playlist cache and YouTube instance
+const playlistCache = new Map();
+let ytInstance = null;
+
+// ✅ Initialize YouTube instance
+async function initYouTube() {
+  if (ytInstance) return ytInstance;
+  ytInstance = await Innertube.create({ retrieve_player: false });
+  console.log('✅ YouTube instance initialized');
+  return ytInstance;
+}
+
+// ✅ Extract playlist ID from various formats
+function extractPlaylistId(input) {
+  if (!input) return null;
+  if (/^[a-zA-Z0-9_-]+$/.test(input) && input.length > 10) {
+    return input;
+  }
+  try {
+    const url = new URL(input);
+    return url.searchParams.get('list');
+  } catch {
+    const match = input.match(/[?&]list=([a-zA-Z0-9_-]+)/);
+    return match ? match[1] : null;
+  }
+}
 
 // ✅ CORRECTED: Proper yt-dlp options for channel/playlist extraction
 function getYtDlpOptions(isFlat = true) {
@@ -23,7 +51,6 @@ function getYtDlpOptions(isFlat = true) {
   };
 
   if (isFlat) {
-    // For getting list of videos (flat extraction)
     options.flatPlaylist = true;
     options.dumpSingleJson = true;
   }
@@ -57,7 +84,6 @@ function parseChannelInput(channelParam) {
 // ✅ Helper to parse channel URL for playlists
 function parseChannelInputForPlaylists(channelParam) {
   if (channelParam.includes("youtube.com")) {
-    // Remove /videos or /playlists if present
     let cleanUrl = channelParam.replace(/\/(videos|playlists)\/?$/, "");
     if (cleanUrl.endsWith("/")) {
       return cleanUrl + "playlists";
@@ -98,14 +124,12 @@ async function fetchChannelInBatches(channelUrl) {
 
       const batchData = await youtubedl(channelUrl, options);
 
-      // Check if we got any data
       if (!batchData) {
         console.log(`⚠️ No data returned for batch ${currentBatch}`);
         hasMore = false;
         break;
       }
 
-      // Handle both single video and playlist responses
       let entries = [];
 
       if (batchData.entries && Array.isArray(batchData.entries)) {
@@ -140,7 +164,6 @@ async function fetchChannelInBatches(channelUrl) {
         `✅ Batch ${currentBatch} fetched: ${batchVideos.length} videos (Total so far: ${allVideos.length})`
       );
 
-      // If we got less than batchSize, we've reached the end
       if (batchVideos.length < batchSize) {
         console.log(
           `✅ Reached end of channel. Total videos: ${allVideos.length}`
@@ -148,13 +171,11 @@ async function fetchChannelInBatches(channelUrl) {
         hasMore = false;
       } else {
         currentBatch++;
-        // Small delay to avoid rate limiting
         await new Promise((resolve) => setTimeout(resolve, 1000));
       }
     } catch (error) {
       console.error(`❌ Error in batch ${currentBatch}:`, error.message);
 
-      // If it's a "no more videos" error, stop gracefully
       if (
         error.message.includes("no videos") ||
         error.message.includes("Playlist does not") ||
@@ -173,7 +194,7 @@ async function fetchChannelInBatches(channelUrl) {
   return allVideos;
 }
 
-// ✅ NEW: Fetch just playlist IDs (FAST - no details)
+// ✅ Fetch just playlist IDs (FAST - no details)
 async function fetchChannelPlaylistIds(channelUrl) {
   console.log(`📋 Fetching playlist IDs from channel (fast mode)...`);
 
@@ -200,7 +221,6 @@ async function fetchChannelPlaylistIds(channelUrl) {
 
     console.log(`📋 Found ${entries.length} playlists`);
 
-    // Extract only IDs (super fast)
     const playlistIds = entries
       .filter((entry) => entry && entry.id)
       .map((entry) => entry.id);
@@ -213,7 +233,7 @@ async function fetchChannelPlaylistIds(channelUrl) {
   }
 }
 
-// ✅ NEW: Fetch single playlist details
+// ✅ Fetch single playlist details
 async function fetchPlaylistDetails(playlistId) {
   console.log(`🔍 Fetching details for playlist: ${playlistId}`);
 
@@ -224,7 +244,7 @@ async function fetchPlaylistDetails(playlistId) {
 
     const options = {
       ...getYtDlpOptions(true),
-      playlistEnd: 1, // Just get first video to get playlist info
+      playlistEnd: 1,
     };
 
     const playlistInfo = await youtubedl(playlistUrl, options);
@@ -258,7 +278,49 @@ async function fetchPlaylistDetails(playlistId) {
   }
 }
 
-// ✅ NEW API Route: GET /api/channel/playlists (FAST - just IDs and count)
+// ✅ Get full playlist with all videos using youtubei.js
+async function getPlaylist(playlistId) {
+  if (playlistCache.has(playlistId)) {
+    console.log(`✅ Cache hit: ${playlistId}`);
+    return playlistCache.get(playlistId);
+  }
+
+  console.log(`🔄 Fetching: ${playlistId}`);
+  const yt = await initYouTube();
+  let playlist = await yt.getPlaylist(playlistId);
+
+  const allVideos = [];
+  allVideos.push(...playlist.videos);
+
+  while (playlist.has_continuation) {
+    playlist = await playlist.getContinuation();
+    allVideos.push(...playlist.videos);
+    console.log(`Progress: ${allVideos.length} videos`);
+  }
+
+  const videoData = {
+    id: playlistId,
+    title: playlist.info?.title || 'Playlist',
+    videoCount: allVideos.length,
+    videos: allVideos.map(v => ({
+      id: v.id,
+      title: v.title?.text || 'Unknown',
+      img: v.thumbnails?.[0]?.url || '',
+      duration: v.duration?.text || 'N/A',
+      author: v.author?.name || 'Unknown'
+    }))
+  };
+
+  playlistCache.set(playlistId, videoData);
+  console.log(`✅ Cached ${videoData.videos.length} videos`);
+  return videoData;
+}
+
+// ═══════════════════════════════════════════════════════════════
+// 📡 API ROUTES
+// ═══════════════════════════════════════════════════════════════
+
+// ✅ GET /api/channel/playlists (FAST - just IDs and count)
 router.get("/channel/playlists", async (req, res) => {
   try {
     const channelParam = req.query.channel;
@@ -292,7 +354,6 @@ router.get("/channel/playlists", async (req, res) => {
     try {
       playlistIds = await fetchChannelPlaylistIds(channelUrl);
 
-      // Get channel info from first playlist if available
       if (playlistIds.length > 0) {
         try {
           const firstPlaylistUrl = `https://www.youtube.com/playlist?list=${playlistIds[0]}`;
@@ -375,7 +436,7 @@ router.get("/channel/playlists", async (req, res) => {
   }
 });
 
-// ✅ NEW API Route: GET /api/playlist/info (get single playlist details)
+// ✅ GET /api/playlist/info (get single playlist details)
 router.get("/playlist/info", async (req, res) => {
   try {
     const playlistId = req.query.listid;
@@ -447,7 +508,7 @@ router.get("/playlist/info", async (req, res) => {
   }
 });
 
-// ✅ API Route: GET /api/channel (fetches ALL videos in batches)
+// ✅ GET /api/channel (fetches ALL videos in batches)
 router.get("/channel", async (req, res) => {
   try {
     const channelParam = req.query.channel;
@@ -471,7 +532,6 @@ router.get("/channel", async (req, res) => {
     const channelUrl = parseChannelInput(channelParam);
     console.log("📺 Channel URL:", channelUrl);
 
-    // ✅ Fetch all videos in batches
     let allVideos;
     let channelInfo = {
       name: "Unknown",
@@ -482,7 +542,6 @@ router.get("/channel", async (req, res) => {
     try {
       allVideos = await fetchChannelInBatches(channelUrl);
 
-      // Get channel info from first video if available
       if (allVideos.length > 0) {
         try {
           const firstVideoUrl = allVideos[0].url;
@@ -565,7 +624,7 @@ router.get("/channel", async (req, res) => {
   }
 });
 
-// ✅ API Route: GET /api/channel/range (fetch specific range - FAST)
+// ✅ GET /api/channel/range (fetch specific range - FAST)
 router.get("/channel/range", async (req, res) => {
   try {
     const channelParam = req.query.channel;
@@ -643,7 +702,6 @@ router.get("/channel/range", async (req, res) => {
         title: entry.title || "Unknown",
       }));
 
-    // Get channel info
     let channelInfo = {
       name: "Unknown",
       id: "Unknown",
@@ -689,7 +747,7 @@ router.get("/channel/range", async (req, res) => {
   }
 });
 
-// ✅ API Route: GET /api/channel/info (just channel info)
+// ✅ GET /api/channel/info (just channel info)
 router.get("/channel/info", async (req, res) => {
   try {
     const channelParam = req.query.channel;
@@ -710,7 +768,6 @@ router.get("/channel/info", async (req, res) => {
 
     const channelData = await youtubedl(channelUrl, options);
 
-    // Get first video to extract channel info
     let channelInfo = {
       name: "Unknown",
       id: "Unknown",
@@ -748,68 +805,7 @@ router.get("/channel/info", async (req, res) => {
   }
 });
 
-const playlistCache = new Map();
-let ytInstance = null;
-
-async function initYouTube() {
-  if (ytInstance) return ytInstance;
-  ytInstance = await Innertube.create({ retrieve_player: false });
-  console.log('✅ YouTube instance initialized');
-  return ytInstance;
-}
-
-function extractPlaylistId(input) {
-  if (!input) return null;
-  if (/^[a-zA-Z0-9_-]+$/.test(input) && input.length > 10) {
-    return input;
-  }
-  try {
-    const url = new URL(input);
-    return url.searchParams.get('list');
-  } catch {
-    const match = input.match(/[?&]list=([a-zA-Z0-9_-]+)/);
-    return match ? match[1] : null;
-  }
-}
-
-async function getPlaylist(playlistId) {
-  if (playlistCache.has(playlistId)) {
-    console.log(`✅ Cache hit: ${playlistId}`);
-    return playlistCache.get(playlistId);
-  }
-
-  console.log(`🔄 Fetching: ${playlistId}`);
-  const yt = await initYouTube();
-  let playlist = await yt.getPlaylist(playlistId);
-
-  const allVideos = [];
-  allVideos.push(...playlist.videos);
-
-  while (playlist.has_continuation) {
-    playlist = await playlist.getContinuation();
-    allVideos.push(...playlist.videos);
-    console.log(`Progress: ${allVideos.length} videos`);
-  }
-
-  const videoData = {
-    id: playlistId,
-    title: playlist.info?.title || 'Playlist',
-    videoCount: allVideos.length,
-    videos: allVideos.map(v => ({
-      id: v.id,
-      title: v.title?.text || 'Unknown',
-      img: v.thumbnails?.[0]?.url || '',
-      duration: v.duration?.text || 'N/A',
-      author: v.author?.name || 'Unknown'
-    }))
-  };
-
-  playlistCache.set(playlistId, videoData);
-  console.log(`✅ Cached ${videoData.videos.length} videos`);
-  return videoData;
-}
-
-
+// ✅ GET /api/playlist (get playlist metadata)
 router.get('/playlist', async (req, res) => {
   try {
     const playlistId = extractPlaylistId(req.query.id || req.query.list);
@@ -827,6 +823,7 @@ router.get('/playlist', async (req, res) => {
   }
 });
 
+// ✅ GET /api/videos (get playlist videos with pagination)
 router.get('/videos', async (req, res) => {
   try {
     const playlistId = extractPlaylistId(req.query.list || req.query.playlist);
@@ -869,18 +866,24 @@ export default router;
 // ═══════════════════════════════════════════════════════════════
 
 // 1️⃣ Get all playlist IDs from a channel (FAST):
-// curl "http://localhost:3000/api/channel/playlists?channel=@bigmagic"
+// GET /api/channel/playlists?channel=@bigmagic
 // Response: { totalPlaylists: 172, playlists: ["PLxxx", "PLyyy", ...] }
 
 // 2️⃣ Get details of a specific playlist:
-// curl "http://localhost:3000/api/playlist/info?listid=PLrAXtmErZgOeiKm4sgNOknGvNjby9efdf"
+// GET /api/playlist/info?listid=PLrAXtmErZgOeiKm4sgNOknGvNjby9efdf
 // Response: { playlistId, title, totalVideos, thumbnail, url }
 
 // 3️⃣ Get all videos from a channel:
-// curl "http://localhost:3000/api/channel?channel=@TED"
+// GET /api/channel?channel=@TED
 
 // 4️⃣ Get specific range of videos:
-// curl "http://localhost:3000/api/channel/range?channel=@TED&start=1&end=50"
+// GET /api/channel/range?channel=@TED&start=1&end=50
 
 // 5️⃣ Get channel info:
-// curl "http://localhost:3000/api/channel/info?channel=@TED"
+// GET /api/channel/info?channel=@TED
+
+// 6️⃣ Get playlist metadata (using youtubei.js):
+// GET /api/playlist?id=PLrAXtmErZgOeiKm4sgNOknGvNjby9efdf
+
+// 7️⃣ Get playlist videos with pagination:
+// GET /api/videos?list=PLrAXtmErZgOeiKm4sgNOknGvNjby9efdf&page=1&limit=20
